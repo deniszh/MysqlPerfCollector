@@ -9,11 +9,12 @@ in how loaded your single-threaded mysql replication is.
 Please see this [post] (http://www.kaarsemaker.net/blog/2012/09/27/monitoring-replication-load-graphite/) for details.
 
 Original [Diamond] (https://github.com/BrightcoveOS/Diamond/) plugin (c) 2012, Dennis Kaarsemaker <dennis@kaarsemaker.net>
+
 Port to [Collectd] (http://collectd.org) (c) 2014, Denis Zhdanov <denis.zhdanov@gmail.com>
 
 Requirements
 --------------
-Python 2.6, python-mysqldb, collectd, MySQL 5.6 (do not test on 5.5)
+Python 2.6, python-mysqldb, collectd, MySQL 5.6 (did not test it on 5.5)
 
 Install
 -------
