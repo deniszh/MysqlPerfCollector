@@ -1,8 +1,9 @@
-# Diamond collector that monitors relevant MySQL performance_schema values
+# Collectd collector that monitors relevant MySQL performance_schema values
 # For now only monitors replication load
 #
-# (c) 2012 Dennis Kaarsemaker <dennis@kaarsemaker.net>
-
+# Original version (c) 2012 Dennis Kaarsemaker <dennis@kaarsemaker.net>
+# collectd porting - (c) 2014 Denis Zhdanov <denis.zhdanov@gmail.com>
+#
 from __future__ import division
 
 try:
@@ -10,17 +11,22 @@ try:
     from MySQLdb import MySQLError
 except ImportError:
     MySQLdb = None
-import diamond
-import re
-import time
 
-class MySQLPerfCollector(diamond.collector.Collector):
+class MySQLPerfCollector(object):
 
-    def __init__(self, *args, **kwargs):
-        super(MySQLPerfCollector,self).__init__(*args, **kwargs)
+    def __init__(self, verbose_logging=False):
+        self.plugin_name = 'MySQLPerfCollector'
+        self.plugin_instance = ''
+        self.collectd_type = 'gauge'
+        self.verbose_logging = verbose_logging
+        self.host = 'localhost'
+        self.port = 3306
+        self.user = 'root'
+        self.password = None
+        self.db_name = 'performance_schema'
+
         self.db = None
         self.cursor = None
-        self.connect()
         self.last_wait_count = {}
         self.last_wait_sum = {}
         self.last_timestamp = {}
@@ -54,43 +60,25 @@ class MySQLPerfCollector(diamond.collector.Collector):
             }
         }
 
-    def get_default_config(self):
-        """
-        Returns the default collector settings
-        """
-        return {
-            'path':     'mysql',
-            # Connection settings
-            'host':     'localhost',
-            'port':     3306,
-            'db':       'yourdatabase',
-            'user':     'yourusername',
-            'passwd':   'yourpassword',
-            
-            'slave':    'False',
-            'master':   'False',
-            'innodb':    'False',
-        }
-
     def connect(self):
         if MySQLdb is None:
-            self.log.error('Unable to import MySQLdb')
+            collectd.error('Unable to import MySQLdb')
             return
 
         params = {}
-        params['host']   = self.config['host']
-        params['port']   = int(self.config['port'])
-        params['db']     = self.config['db']
-        params['user']   = self.config['user']
-        params['passwd'] = self.config['passwd']
+        params['host'] = self.host
+        params['port'] = self.port
+        params['db'] = self.db_name
+        params['user'] = self.user
+        params['passwd'] = self.password
 
         try:
             self.db = MySQLdb.connect(**params)
         except MySQLError, e:
-            self.log.error('MySQLPerfCollector couldnt connect to database %s', e)
+            collectd.error('MySQLPerfCollector couldn\'t connect to database %s', e)
             return {}
 
-        self.log.info('MySQLPerfCollector: Connected to database.')
+        self.log_verbose('MySQLPerfCollector: Connected to database.')
 
     def slave_load(self, thread):
         cursor = self.db.cursor()
@@ -115,7 +103,7 @@ class MySQLPerfCollector(diamond.collector.Collector):
         wait_sum = sum([x[1] for x in data])
         wait_count = sum([x[2] for x in data])
         cur_event_name, timestamp = data[0][3:] 
-        load = {}
+        self.cursor = cursor
 
         if thread not in self.last_wait_sum:
             # Avoid bogus data
@@ -125,7 +113,7 @@ class MySQLPerfCollector(diamond.collector.Collector):
             return
 
         wait_delta = wait_sum - self.last_wait_sum[thread]
-        time_delta = (timestamp - self.last_timestamp[thread]) * 1000000000000;
+        time_delta = (timestamp - self.last_timestamp[thread]) * 1000000000000
 
         # Summarize a few things
         thread_name = thread[thread.rfind('/')+1:]
@@ -134,25 +122,78 @@ class MySQLPerfCollector(diamond.collector.Collector):
         data.append(['wait/synch/rwlock', sum([x[1] for x in data if x[0].startswith('wait/synch/rwlock')])])
         data.append(['wait/io', sum([x[1] for x in data if x[0].startswith('wait/io') and x[0] not in self.monitors[thread_name]])])
 
-
         for d in zip(self.last_data[thread], data):
             if d[0][0] in self.monitors[thread_name]:
-                self.publish(thread_name + '.' + self.monitors[thread_name][d[0][0]], (d[1][1] - d[0][1])/time_delta * 100)
+                self.dispatch_value(thread_name + '.' + self.monitors[thread_name][d[0][0]], int((d[1][1] - d[0][1])/time_delta * 100))
 
         # Also log what's unaccounted for. This is where Actual Work gets done
-        self.publish(thread_name + '.other_work',  float(time_delta - wait_delta) / time_delta * 100)
+        self.dispatch_value(thread_name + '.other_work',  int(float(time_delta - wait_delta) / time_delta * 100))
 
         self.last_wait_sum[thread], self.last_wait_count[thread], self.last_timestamp[thread] = \
             wait_sum, wait_count, timestamp
         self.last_data[thread] = data
 
+    def log_verbose(self, msg):
+        if not self.verbose_logging:
+            return
+        elif __name__ == '__main__':
+            print msg
+        else:
+            collectd.info('%s plugin [verbose]: %s' % (self.plugin_name, msg))
 
-    def collect(self):
-        if self.config['slave']:
-            try:
-                self.slave_load('thread/sql/slave_io')
-                self.slave_load('thread/sql/slave_sql')
-            except MySQLdb.OperationalError:
-                self.connect()
-                self.slave_load('thread/sql/slave_io')
-                self.slave_load('thread/sql/slave_sql')
+    def dispatch_value(self, instance, value):
+        """Dispatch a value to collectd"""
+        self.log_verbose('Sending value: %s.%s.%s=%s' % (self.plugin_name, self.plugin_instance, instance, value))
+        if value < 0:
+            self.log_verbose('Value %s=%s is negative, skipping' % (instance, value))
+            return
+        if __name__ == "__main__":
+            return
+        val = collectd.Values()
+        val.plugin = self.plugin_name
+        val.plugin_instance = self.plugin_instance
+        val.type = self.collectd_type
+        val.type_instance = instance
+        val.values = [value, ]
+        val.dispatch()
+
+    def read_callback(self):
+        try:
+            self.slave_load('thread/sql/slave_io')
+            self.slave_load('thread/sql/slave_sql')
+        except MySQLdb.OperationalError:
+            self.connect()
+            self.slave_load('thread/sql/slave_io')
+            self.slave_load('thread/sql/slave_sql')
+
+    def configure_callback(self, conf):
+        """Receive configuration block"""
+        for node in conf.children:
+            if node.key == 'Host':
+                self.host = node.values[0]
+            elif node.key == 'Port':
+                self.port = int(node.values[0])
+            elif node.key == 'DB':
+                self.db = node.values[0]
+            elif node.key == 'User':
+                self.user = node.values[0]
+            elif node.key == 'Password':
+                self.password = node.values[0]
+            elif node.key == 'Verbose':
+                self.verbose_logging = bool(node.values[0])
+            elif node.key == 'NamePrefix':
+                self.plugin_name = node.values[0] + self.plugin_name
+            else:
+                collectd.warning('%s plugin: Unknown config key: %s.' % (self.plugin_name, node.key))
+        self.log_verbose('Configured with host=%s,port=%s,db=%s' % (self.host, self.port, self.db))
+
+
+if __name__ == "__main__":
+    conn = MySQLPerfCollector(verbose_logging=True)
+    conn.read_callback()
+else:
+    import collectd
+    conn = MySQLPerfCollector()
+    # register callbacks
+    collectd.register_config(conn.configure_callback)
+    collectd.register_read(conn.read_callback)
