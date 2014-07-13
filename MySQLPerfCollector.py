@@ -16,13 +16,13 @@ class MySQLPerfCollector(object):
 
     def __init__(self, verbose_logging=False):
         self.plugin_name = 'MySQLPerfCollector'
-        self.plugin_instance = ''
+        self.plugin_instance = 'ps'
         self.collectd_type = 'gauge'
         self.verbose_logging = verbose_logging
         self.host = 'localhost'
         self.port = 3306
         self.user = 'root'
-        self.password = None
+        self.password = ''
         self.db_name = 'performance_schema'
 
         self.db = None
@@ -75,7 +75,7 @@ class MySQLPerfCollector(object):
         try:
             self.db = MySQLdb.connect(**params)
         except MySQLError, e:
-            collectd.error('MySQLPerfCollector couldn\'t connect to database %s', e)
+            self.log_verbose('MySQLPerfCollector couldn\'t connect to database %s' % e, 'error')
             return {}
 
         self.log_verbose('MySQLPerfCollector: Connected to database.')
@@ -83,13 +83,13 @@ class MySQLPerfCollector(object):
     def slave_load(self, thread):
         cursor = self.db.cursor()
         cursor.execute("""
-            SELECT 
+            SELECT
                 his.event_name,
                 his.sum_timer_wait,
-                his.count_star, 
-                cur.event_name, 
+                his.count_star,
+                cur.event_name,
                 UNIX_TIMESTAMP(SYSDATE())
-            FROM 
+            FROM
                 events_waits_summary_by_thread_by_event_name his
                 JOIN threads thr USING (thread_id)
                 JOIN events_waits_current cur USING (thread_id)
@@ -100,9 +100,13 @@ class MySQLPerfCollector(object):
             """, (thread,))
 
         data = list(cursor.fetchall())
+        if not data:
+            self.log_verbose('Got no thread info, master server?')
+            return
+
         wait_sum = sum([x[1] for x in data])
         wait_count = sum([x[2] for x in data])
-        cur_event_name, timestamp = data[0][3:] 
+        cur_event_name, timestamp = data[0][3:]
         self.cursor = cursor
 
         if thread not in self.last_wait_sum:
@@ -118,13 +122,16 @@ class MySQLPerfCollector(object):
         # Summarize a few things
         thread_name = thread[thread.rfind('/')+1:]
         data.append(['wait/synch/mutex/innodb', sum([x[1] for x in data if x[0].startswith('wait/synch/mutex/innodb')])])
-        data.append(['wait/synch/mutex', sum([x[1] for x in data if x[0].startswith('wait/synch/mutex') and x[0] not in self.monitors[thread_name]]) - data[-1][1]])
+        data.append(['wait/synch/mutex', sum([x[1] for x in data if x[0].startswith('wait/synch/mutex')
+                                              and x[0] not in self.monitors[thread_name]]) - data[-1][1]])
         data.append(['wait/synch/rwlock', sum([x[1] for x in data if x[0].startswith('wait/synch/rwlock')])])
-        data.append(['wait/io', sum([x[1] for x in data if x[0].startswith('wait/io') and x[0] not in self.monitors[thread_name]])])
+        data.append(['wait/io', sum([x[1] for x in data if x[0].startswith('wait/io')
+                                     and x[0] not in self.monitors[thread_name]])])
 
         for d in zip(self.last_data[thread], data):
             if d[0][0] in self.monitors[thread_name]:
-                self.dispatch_value(thread_name + '.' + self.monitors[thread_name][d[0][0]], int((d[1][1] - d[0][1])/time_delta * 100))
+                self.dispatch_value(thread_name + '.' + self.monitors[thread_name][d[0][0]],
+                                    int((d[1][1] - d[0][1])/time_delta * 100))
 
         # Also log what's unaccounted for. This is where Actual Work gets done
         self.dispatch_value(thread_name + '.other_work',  int(float(time_delta - wait_delta) / time_delta * 100))
@@ -133,11 +140,15 @@ class MySQLPerfCollector(object):
             wait_sum, wait_count, timestamp
         self.last_data[thread] = data
 
-    def log_verbose(self, msg):
+    def log_verbose(self, msg, level='info'):
         if not self.verbose_logging:
             return
         elif __name__ == '__main__':
             print msg
+        elif level == 'error':
+            collectd.error('%s plugin [verbose]: %s' % (self.plugin_name, msg))
+        elif level == 'warning':
+            collectd.warning('%s plugin [verbose]: %s' % (self.plugin_name, msg))
         else:
             collectd.info('%s plugin [verbose]: %s' % (self.plugin_name, msg))
 
@@ -181,16 +192,28 @@ class MySQLPerfCollector(object):
                 self.password = node.values[0]
             elif node.key == 'Verbose':
                 self.verbose_logging = bool(node.values[0])
+            elif node.key == 'InstanceName':
+                self.plugin_instance = node.values[0]
             elif node.key == 'NamePrefix':
                 self.plugin_name = node.values[0] + self.plugin_name
             else:
-                collectd.warning('%s plugin: Unknown config key: %s.' % (self.plugin_name, node.key))
+                self.log_verbose('%s plugin: Unknown config key: %s.' % (self.plugin_name, node.key), 'warning')
         self.log_verbose('Configured with host=%s,port=%s,db=%s' % (self.host, self.port, self.db))
+        self.connect()
+        self.log_verbose('Successfully connected to host=%s,port=%s,db=%s' % (self.host, self.port, self.db))
 
 
 if __name__ == "__main__":
+    import time
     conn = MySQLPerfCollector(verbose_logging=True)
+    conn.connect()
+    conn.log_verbose('First run')
     conn.read_callback()
+    conn.log_verbose('Sleeping 5 sec')
+    time.sleep(5)
+    conn.log_verbose('Second run')
+    conn.read_callback()
+    conn.log_verbose('End')
 else:
     import collectd
     conn = MySQLPerfCollector()
